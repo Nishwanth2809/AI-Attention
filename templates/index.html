@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Attention Monitor</title>
+    <meta name="description" content="Real-time AI-powered attention monitoring using computer vision">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <span class="logo-icon">👁️</span>
+                <h1>Attention Monitor</h1>
+            </div>
+            <div class="header-controls">
+                <button id="btn-webcam" class="btn btn-primary" onclick="startWebcam()">
+                    <span>📷</span> Start Webcam
+                </button>
+                <label class="btn btn-secondary" for="video-upload">
+                    <span>📁</span> Upload Video
+                </label>
+                <input type="file" id="video-upload" accept="video/*" onchange="uploadVideo(this)" hidden>
+                <button id="btn-stop" class="btn btn-danger" onclick="stopFeed()" disabled>
+                    <span>⏹</span> Stop
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Video Feed -->
+            <section class="video-panel">
+                <div class="video-container" id="video-container">
+                    <div class="video-placeholder" id="video-placeholder">
+                        <div class="placeholder-icon">🎥</div>
+                        <p>Start webcam or upload a video to begin monitoring</p>
+                    </div>
+                    <img id="video-feed" src="" alt="Video Feed" style="display:none;">
+                </div>
+            </section>
+
+            <!-- Score Panel -->
+            <aside class="score-panel">
+                <!-- Attention Score -->
+                <div class="score-card main-score">
+                    <h2>Attention Score</h2>
+                    <div class="score-circle" id="score-circle">
+                        <svg viewBox="0 0 120 120">
+                            <circle class="score-bg" cx="60" cy="60" r="52"/>
+                            <circle class="score-progress" id="score-ring" cx="60" cy="60" r="52"
+                                    stroke-dasharray="326.73" stroke-dashoffset="326.73"/>
+                        </svg>
+                        <span class="score-value" id="score-value">--</span>
+                    </div>
+                    <div class="status-badge" id="status-badge">Waiting</div>
+                </div>
+
+                <!-- Component Scores -->
+                <div class="score-card">
+                    <h3>Components</h3>
+                    <div class="component">
+                        <span class="comp-label">👁️ Gaze</span>
+                        <div class="comp-bar"><div class="comp-fill" id="gaze-bar"></div></div>
+                        <span class="comp-value" id="gaze-value">--</span>
+                    </div>
+                    <div class="component">
+                        <span class="comp-label">🗣️ Head Pose</span>
+                        <div class="comp-bar"><div class="comp-fill" id="head-bar"></div></div>
+                        <span class="comp-value" id="head-value">--</span>
+                    </div>
+                    <div class="component">
+                        <span class="comp-label">😌 Blink</span>
+                        <div class="comp-bar"><div class="comp-fill" id="blink-bar"></div></div>
+                        <span class="comp-value" id="blink-value">--</span>
+                    </div>
+                </div>
+
+                <!-- Details -->
+                <div class="score-card">
+                    <h3>Details</h3>
+                    <div class="detail-row">
+                        <span>Gaze Direction</span>
+                        <span id="gaze-dir">--</span>
+                    </div>
+                    <div class="detail-row">
+                        <span>Head Direction</span>
+                        <span id="head-dir">--</span>
+                    </div>
+                    <div class="detail-row">
+                        <span>Blinks/min</span>
+                        <span id="blink-rate">--</span>
+                    </div>
+                </div>
+
+                <!-- Session History Link -->
+                <div class="score-card">
+                    <h3>Sessions</h3>
+                    <div id="session-list" class="session-list">
+                        <p class="muted">No sessions yet</p>
+                    </div>
+                </div>
+            </aside>
+        </main>
+    </div>
+
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

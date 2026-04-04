@@ -1,0 +1,580 @@
+# AI Attention Monitoring System — Complete Technical Analysis
+
+---
+
+## 1. Project Overview
+
+The **AI Attention Monitoring System** is a real-time computer vision application that measures a user's attention level by analyzing webcam or uploaded video feeds. It leverages **MediaPipe Face Mesh** to detect 478 facial landmarks per frame and computes three behavioral signals — **eye gaze direction** (iris tracking), **head pose estimation** (yaw/pitch/roll via `solvePnP`), and **blink rate / drowsiness** (Eye Aspect Ratio algorithm) — then fuses them into a single **Attention Score (0–100)** using a weighted formula: **Gaze 40% + Head Pose 30% + Blink 30%**.
+
+The system solves the real-world problem of **unobtrusive, automated attention monitoring** applicable to online education, remote proctoring, driver alertness systems, and workplace productivity tracking. It classifies attention states into **Focused** (≥ 65), **Distracted** (35–64), and **Drowsy** (prolonged eye closure > 2 seconds).
+
+Key objectives include providing **real-time feedback** through an annotated video overlay and a web dashboard, **session persistence** in SQLite with full score timelines, and a **REST API** for programmatic access to attention data. The system supports both live webcam input and uploaded video file analysis.
+
+---
+
+## 2. Dataset Information
+
+> [!IMPORTANT]
+> This project does **not** use a pre-compiled training dataset. It is an **inference-only, rule-based system** that processes live or uploaded video in real time.
+
+| Aspect | Details |
+|---|---|
+| **Input Source** | Live webcam feed (`cv2.VideoCapture(0)`) or uploaded video files (`.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`) |
+| **Data Type** | Raw video frames (BGR images via OpenCV) |
+| **Max Upload Size** | 200 MB (`MAX_CONTENT_LENGTH` in Flask config) |
+| **Preprocessing** | BGR → RGB conversion for MediaPipe processing |
+| **Face Detection** | **MediaPipe Face Mesh** with `refine_landmarks=True` (478 landmarks including iris landmarks 468–477) |
+| **Frame Extraction** | Continuous frame-by-frame processing from `cv2.VideoCapture` |
+| **Normalization** | Landmarks are returned as normalized coordinates (0–1) and then scaled to pixel coordinates using `frame_w` and `frame_h` |
+| **Webcam Mirroring** | Horizontal flip (`cv2.flip(frame, 1)`) applied for webcam only |
+
+### Preprocessing Pipeline (per frame):
+
+```python
+# 1. Read frame
+ret, frame = cap.read()
+
+# 2. Mirror (webcam only)
+frame = cv2.flip(frame, 1)
+
+# 3. Convert BGR → RGB for MediaPipe
+rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+rgb.flags.writeable = False
+
+# 4. Process through Face Mesh
+results = self.face_mesh.process(rgb)
+
+# 5. Extract 478 normalized landmarks
+landmarks = results.multi_face_landmarks[0].landmark
+```
+
+---
+
+## 3. Model Architecture
+
+> [!NOTE]
+> This system does **not** use a traditional deep learning model (CNN/ResNet/Transformer). It uses **MediaPipe Face Mesh** as a pre-trained landmark detector and applies **geometric/algorithmic methods** for feature computation.
+
+### 3.1 Face Detection Backbone
+
+| Parameter | Value |
+|---|---|
+| **Model** | MediaPipe Face Mesh (pre-trained, bundled with `mediapipe` library) |
+| **Landmark Count** | 478 (468 standard + 10 iris landmarks with `refine_landmarks=True`) |
+| **Max Faces** | 1 |
+| **Min Detection Confidence** | 0.5 |
+| **Min Tracking Confidence** | 0.5 |
+| **Input** | Arbitrary-resolution RGB frames |
+
+### 3.2 Gaze Tracking Module ([gaze_tracking.py](file:///c:/Users/nishw/Projects/AI%20Attention/src/gaze_tracking.py))
+
+Uses **iris landmark positions** relative to eye corner landmarks for gaze estimation:
+
+| Component | Landmark Indices |
+|---|---|
+| Right Iris Center | 468 |
+| Left Iris Center | 473 |
+| Right Eye Corners | Inner: 133, Outer: 33 |
+| Left Eye Corners | Inner: 362, Outer: 263 |
+| Right Eye Top/Bottom | Top: 159, Bottom: 145 |
+| Left Eye Top/Bottom | Top: 386, Bottom: 374 |
+
+**Algorithm:** Computes horizontal and vertical **iris-position ratios** (0–1) within the eye bounding box. Center = 0.5. Smoothed using a 5-frame history window with `np.mean()`.
+
+```python
+# Gaze score: 1.0 at center, 0.0 when looking completely away
+h_score = max(0.0, 1.0 - h_dev * 2.0)
+v_score = max(0.0, 1.0 - v_dev * 2.0)
+gaze_score = 0.7 * h_score + 0.3 * v_score
+```
+
+### 3.3 Head Pose Estimation Module ([head_pose.py](file:///c:/Users/nishw/Projects/AI%20Attention/src/head_pose.py))
+
+Uses **OpenCV `solvePnP`** (Perspective-n-Point) with a generic 3D face model and 6 key facial landmarks:
+
+| Landmark | Index | 3D Model Point |
+|---|---|---|
+| Nose tip | 1 | (0, 0, 0) |
+| Chin | 152 | (0, −330, −65) |
+| Left eye corner | 33 | (−225, 170, −135) |
+| Right eye corner | 263 | (225, 170, −135) |
+| Left mouth corner | 61 | (−150, −150, −125) |
+| Right mouth corner | 291 | (150, −150, −125) |
+
+**Algorithm:**
+1. Extract 2D image points from landmarks
+2. Construct approximate camera matrix (`focal_length = frame_width`)
+3. Solve PnP → rotation vector → Rodrigues → Euler angles (yaw, pitch, roll)
+4. Clamp to ±90° range, smooth with 7-frame history
+
+```python
+# Head pose score
+yaw_score   = max(0.0, 1.0 - abs(yaw) / 60.0)
+pitch_score = max(0.0, 1.0 - abs(pitch) / 50.0)
+roll_score  = max(0.0, 1.0 - abs(roll) / 45.0)
+head_score  = 0.5 * yaw_score + 0.35 * pitch_score + 0.15 * roll_score
+```
+
+| Threshold | Value |
+|---|---|
+| Yaw (left/right) | 25° |
+| Pitch (up/down) | 20° |
+| Roll (head tilt) | 20° |
+
+### 3.4 Blink Detection Module ([blink_detection.py](file:///c:/Users/nishw/Projects/AI%20Attention/src/blink_detection.py))
+
+Uses the **Eye Aspect Ratio (EAR)** algorithm with MediaPipe eye landmarks:
+
+| Eye | Vertical Pairs (top, bottom) | Horizontal Corners |
+|---|---|---|
+| Right | (159, 145), (158, 153) | 33, 133 |
+| Left | (386, 374), (385, 380) | 362, 263 |
+
+```
+EAR = (|p2 - p6| + |p3 - p5|) / (2 × |p1 - p4|)
+```
+
+| Parameter | Value |
+|---|---|
+| EAR Threshold (eye closed) | 0.21 |
+| Drowsy Duration | 2.0 seconds continuous closure |
+| Normal Blink Range | 12–20 blinks/min |
+| EAR Smoothing | 5-frame moving average |
+
+### 3.5 Attention Score Calculator ([attention_score.py](file:///c:/Users/nishw/Projects/AI%20Attention/src/attention_score.py))
+
+```python
+# Weighted fusion
+raw_score = (gaze_score × 0.40 + head_score × 0.30 + blink_score × 0.30) × 100
+
+# Drowsy override → raw_score = 10.0
+
+# EMA smoothing (α = 0.3)
+smoothed = α × raw + (1 − α) × previous_smoothed
+```
+
+| Status | Score Range |
+|---|---|
+| **Focused** | ≥ 65 |
+| **Distracted** | 35–64 |
+| **Drowsy** | Triggered by EAR < 0.21 for > 2s |
+
+### 3.6 Final Output
+
+- **Not binary classification** — this is a **continuous regression score** (0–100)
+- Three-class status labeling: Focused / Distracted / Drowsy
+- Output is consumed via REST API (`/api/score`) and drawn as an on-frame overlay
+
+---
+
+## 4. Training Configuration
+
+> [!IMPORTANT]
+> This project does **not** involve model training. It is an **inference-only pipeline** using MediaPipe's pre-trained Face Mesh model combined with rule-based algorithms.
+
+### Algorithmic Configuration (in lieu of training hyperparameters):
+
+| Parameter | Value | Location |
+|---|---|---|
+| EMA Smoothing Alpha | 0.3 | `AttentionScorer.__init__()` |
+| Gaze Weight | 0.40 (40%) | `attention_score.py` |
+| Head Pose Weight | 0.30 (30%) | `attention_score.py` |
+| Blink Weight | 0.30 (30%) | `attention_score.py` |
+| Score History Buffer | 300 entries (~10s at 30fps) | `AttentionScorer.__init__()` |
+| No-Face Decay | −1 per frame after 15 frames | `process_frame()` in `app.py` |
+| DB Logging Interval | Every 30 frames (~1 second) | `process_frame()` in `app.py` |
+| API Polling Rate | 500ms | `useAttentionData.js` / `main.js` |
+
+### Data Augmentation
+
+Not applicable — the system processes raw video frames without augmentation.
+
+---
+
+## 5. Feature Extraction Details
+
+The system extracts **three categories of behavioral features** in real time:
+
+### 5.1 Gaze Features (40% weight)
+- **Horizontal iris ratio**: Position of iris center between left and right eye corners (0.0 = outer, 0.5 = center, 1.0 = inner)
+- **Vertical iris ratio**: Position of iris center between upper and lower eyelid (0.0 = top, 0.5 = center, 1.0 = bottom)
+- **Direction classification**: Center, Left, Right, Up, Down, Left Up, Left Down, Right Up, Right Down
+- **Smoothing**: 5-frame moving average via `np.mean()`
+
+### 5.2 Head Pose Features (30% weight)
+- **Yaw** (horizontal rotation): Detects looking left/right, threshold ±25°
+- **Pitch** (vertical rotation): Detects looking up/down, threshold ±20°
+- **Roll** (head tilt): Detects tilted head, threshold ±20°
+- **Direction classification**: Forward, Left, Right, Up, Down (and combinations)
+- **Smoothing**: 7-frame moving average for yaw and pitch
+
+### 5.3 Blink Features (30% weight)
+- **Eye Aspect Ratio (EAR)**: Geometric ratio of eye openness (vertical/horizontal)
+- **Blink detection**: EAR drops below 0.21, then rises above — counted as one blink
+- **Blinks per minute**: Computed via sliding 60-second window
+- **Drowsiness detection**: Continuous eye closure > 2 seconds triggers drowsy state
+- **Blink score**: 1.0 for 12–20 blinks/min (normal range); linearly degrades outside this range
+
+### Frequency-Domain / Temporal Features
+
+- **No FFT/DCT** frequency-domain analysis
+- **Temporal smoothing** is applied via Exponential Moving Average (EMA) on the final attention score and moving averages on individual signals
+- **Score timeline** is maintained for session graphs (up to 300 data points)
+
+---
+
+## 6. Evaluation Metrics
+
+> [!NOTE]
+> This is a **rule-based real-time system**, not a trained classifier. It does not produce traditional ML evaluation metrics (accuracy, precision, recall, etc.).
+
+### Metrics Tracked by the System:
+
+| Metric | Description | Storage |
+|---|---|---|
+| **Attention Score** | 0–100, EMA-smoothed | Real-time + SQLite |
+| **Component Scores** | Gaze, Head Pose, Blink (each 0–100) | Real-time API |
+| **Status Classification** | Focused / Distracted / Drowsy | Real-time + SQLite |
+| **Blink Rate** | Blinks per minute | Real-time API |
+| **Session Average Score** | Average smoothed score across session | SQLite |
+| **Score Timeline** | Time-series of scores (max 300 entries) | In-memory + SQLite |
+
+### Per-Session Data Logged to SQLite:
+
+```sql
+-- sessions table
+id, source, start_time, end_time, avg_score, status
+
+-- score_log table  
+id, session_id, timestamp, score, status, gaze_score, head_score, blink_score
+```
+
+---
+
+## 7. Results and Performance
+
+### 7.1 Runtime Performance
+
+| Aspect | Details |
+|---|---|
+| **Processing** | Real-time, per-frame (~30fps with webcam) |
+| **Latency** | MediaPipe Face Mesh inference + geometric computation ≈ 15–30ms per frame |
+| **API Polling** | 500ms interval for dashboard updates |
+| **DB Writes** | Every 30 frames (~1 second) |
+
+### 7.2 Attention Scoring Behavior
+
+| Scenario | Expected Score | Status |
+|---|---|---|
+| User looking at screen, normal blink rate | 80–100 | Focused |
+| User looking slightly away | 50–65 | Distracted |
+| Head turned significantly (>25° yaw) | 30–50 | Distracted |
+| Eyes closed > 2 seconds | 10 (override) | Drowsy |
+| No face detected > 15 frames | Decays by −1/frame | No Face Detected |
+
+### 7.3 Observations
+
+- The **EMA smoothing** (α=0.3) prevents score jitter while remaining responsive to genuine attention changes
+- **Drowsy override** immediately drops the score to 10, ensuring critical states are not missed
+- **No-face decay** provides graceful degradation when the user leaves the frame
+- The weighted scoring system prioritizes **gaze (40%)** as the strongest attention indicator
+
+---
+
+## 8. Code Structure
+
+```
+AI Attention/
+├── app.py                         # Flask server — routes, video streaming, pipeline orchestration
+├── requirements.txt               # Python dependencies
+├── README.md                      # Project documentation
+├── attention.db                   # SQLite database (auto-created)
+│
+├── src/                           # Core CV modules (Python package)
+│   ├── __init__.py                # Package marker
+│   ├── face_detection.py          # MediaPipe Face Mesh wrapper (478 landmarks)
+│   ├── gaze_tracking.py           # Iris-based gaze direction and score
+│   ├── head_pose.py               # solvePnP head pose estimation (yaw/pitch/roll)
+│   ├── blink_detection.py         # EAR-based blink rate and drowsiness detection
+│   ├── attention_score.py         # Weighted score fusion with EMA smoothing
+│   └── utils.py                   # Shared utilities (euclidean distance, overlay drawing)
+│
+├── templates/                     # Server-rendered UI (Jinja2)
+│   └── index.html                 # Flask template — standalone dashboard
+│
+├── static/                        # Static assets for Flask template
+│   ├── css/
+│   │   └── style.css              # Dark theme dashboard styles (vanilla CSS)
+│   └── js/
+│       └── main.js                # Client-side JS — webcam/upload/polling logic
+│
+├── frontend/                      # Modern React dashboard (Vite + Tailwind)
+│   ├── index.html                 # React entry HTML
+│   ├── package.json               # NPM dependencies (React 19, Vite 8, Tailwind 4)
+│   ├── vite.config.js             # Vite config with API proxy to Flask backend
+│   └── src/
+│       ├── main.jsx               # React DOM entry
+│       ├── App.jsx                # Root component — layout, state, handlers
+│       ├── index.css              # Tailwind + custom design tokens
+│       ├── hooks/
+│       │   └── useAttentionData.js # Custom hook — polls /api/score every 500ms
+│       └── components/
+│           ├── Navbar.jsx          # Header with Start/Upload/Stop controls
+│           ├── VideoPanel.jsx      # MJPEG video feed display
+│           ├── ScoreCard.jsx       # Circular score ring with status badge
+│           ├── EyeMechanism.jsx    # Animated SVG eyes tracking gaze direction
+│           ├── ComponentsCard.jsx  # Gaze/Head/Blink progress bars
+│           ├── DetailsCard.jsx     # Gaze direction, head direction, blink rate
+│           └── SessionsCard.jsx    # Session history list from API
+│
+└── uploads/                       # Uploaded video files (auto-created, gitignored)
+```
+
+### Module Interaction Diagram
+
+```mermaid
+graph TD
+    A["app.py (Flask Server)"] --> B["FaceDetector"]
+    A --> C["BlinkDetector"]
+    A --> D["HeadPoseEstimator"]
+    A --> E["GazeTracker"]
+    A --> F["AttentionScorer"]
+    A --> G["utils.draw_score_overlay"]
+    
+    B -->|"478 landmarks"| C
+    B -->|"478 landmarks"| D
+    B -->|"478 landmarks"| E
+    
+    C -->|"blink_score, is_drowsy"| F
+    D -->|"head_score"| F
+    E -->|"gaze_score"| F
+    
+    F -->|"smoothed_score, status"| G
+    F -->|"JSON"| H["REST API /api/score"]
+    
+    H --> I["Flask Template (templates/index.html)"]
+    H --> J["React Dashboard (frontend/)"]
+    
+    A -->|"SQLite"| K["attention.db"]
+```
+
+### Key Data Flow
+
+1. **Video frame** → `FaceDetector.detect()` → 478 MediaPipe landmarks
+2. Landmarks → `BlinkDetector.update()` → EAR, blink count, drowsiness
+3. Landmarks → `HeadPoseEstimator.estimate()` → yaw, pitch, roll, head score
+4. Landmarks → `GazeTracker.track()` → iris ratios, gaze direction, gaze score
+5. Component scores → `AttentionScorer.calculate()` → weighted + EMA smoothed score
+6. Score → `draw_score_overlay()` → annotated frame → MJPEG stream
+7. Score → `log_score()` → SQLite (every 30 frames)
+8. Score → `/api/score` REST endpoint → Dashboard polling (500ms)
+
+---
+
+## 9. Libraries and Dependencies
+
+### Backend (Python)
+
+| Library | Version | Purpose |
+|---|---|---|
+| **Python** | 3.x (3.11 recommended) | Runtime |
+| **Flask** | Latest | Web server, routing, templating, REST API |
+| **OpenCV** (`opencv-python`) | Latest | Video capture, BGR↔RGB conversion, `solvePnP`, image encoding, overlay drawing |
+| **MediaPipe** (`mediapipe`) | Latest | Pre-trained Face Mesh model (478 landmarks, iris tracking) |
+| **NumPy** (`numpy`) | Latest | Numerical operations, array manipulation, `np.clip`, `np.mean` |
+| **SQLite3** | Built-in | Session persistence and score timeline storage |
+| **threading** | Built-in | Thread-safe global state via `threading.Lock` |
+
+### Frontend — Flask Template (Vanilla)
+
+| Technology | Details |
+|---|---|
+| HTML5 / CSS3 / JS | Served via Flask's `render_template` / `send_from_directory` |
+| Google Fonts | Inter (weights 300–700) |
+
+### Frontend — React Dashboard
+
+| Library | Version | Purpose |
+|---|---|---|
+| **React** | ^19.2.4 | Component-based UI |
+| **React DOM** | ^19.2.4 | Browser rendering |
+| **Vite** | ^8.0.3 | Dev server + build tool |
+| **@vitejs/plugin-react** | ^6.0.1 | React Fast Refresh |
+| **Tailwind CSS** | ^4.2.2 | Utility-first CSS framework |
+| **@tailwindcss/vite** | ^4.2.2 | Tailwind Vite plugin |
+
+### `requirements.txt`
+
+```
+opencv-python
+mediapipe
+numpy
+flask
+```
+
+---
+
+## 10. Instructions for Execution
+
+### Step 1: Clone and Navigate
+
+```bash
+cd "c:\Users\nishw\Projects\AI Attention"
+```
+
+### Step 2: Create Virtual Environment
+
+```bash
+python -m venv .venv
+
+# Activate (Windows)
+.venv\Scripts\activate
+
+# Activate (macOS/Linux)
+source .venv/bin/activate
+```
+
+### Step 3: Install Python Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### Step 4: Run the Backend Server
+
+```bash
+python app.py
+```
+
+Output:
+```
+============================================================
+  AI Attention Monitoring System
+  Open http://127.0.0.1:5000 in your browser
+============================================================
+```
+
+### Step 5: Access the Application
+
+**Option A — Flask Template UI:**
+Open **http://127.0.0.1:5000** in your browser.
+
+**Option B — React Dashboard (development):**
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then open **http://localhost:5173** (Vite proxies API calls to Flask at port 5000).
+
+### Step 6: Use the Application
+
+1. **Start Webcam**: Click "Start Webcam" button → live attention monitoring begins
+2. **Upload Video**: Click "Upload Video" → select `.mp4`/`.avi`/`.mov`/`.mkv`/`.webm` file → analysis runs frame-by-frame
+3. **Stop**: Click "Stop" to end the current session
+4. **View Results**: Attention score, component breakdown, gaze/head direction, blink rate update in real time
+5. **Session History**: Previous sessions with average scores are listed in the Sessions panel
+
+### Step 7: API Access (Programmatic)
+
+```bash
+# Get current attention score
+curl http://127.0.0.1:5000/api/score
+
+# Get session history
+curl http://127.0.0.1:5000/api/sessions
+
+# Get session detail with timeline
+curl http://127.0.0.1:5000/api/sessions/1
+
+# Get live score timeline
+curl http://127.0.0.1:5000/api/timeline
+
+# Upload video
+curl -X POST -F "video=@path/to/video.mp4" http://127.0.0.1:5000/upload_video
+```
+
+---
+
+## 11. Challenges Faced and Solutions
+
+### 11.1 Real-Time Performance
+
+| Challenge | Solution |
+|---|---|
+| MediaPipe processing latency on each frame | Set `max_num_faces=1` to limit processing; mark RGB array as non-writeable for performance optimization |
+| Score jitter from noisy landmark positions | Applied **Exponential Moving Average** (α=0.3) on final score and moving averages on individual signals (5-frame for gaze/EAR, 7-frame for head pose) |
+
+### 11.2 Accuracy of Geometric Methods
+
+| Challenge | Solution |
+|---|---|
+| `solvePnP` can produce wild Euler angle estimates | Clamp yaw/pitch/roll to ±90° range; smooth with 7-frame history |
+| Iris tracking precision varies with lighting | Average iris ratios from both eyes; apply 5-frame smoothing |
+| EAR threshold sensitivity to face distance | Use smoothed EAR (5-frame average) to reduce false triggers |
+
+### 11.3 Drowsiness vs. Normal Blink
+
+| Challenge | Solution |
+|---|---|
+| Distinguishing a long blink from drowsiness | Require **2 full seconds** of continuous eye closure before triggering Drowsy state |
+| Blink rate unreliable during first few seconds | Default to 15 blinks/min (mid-normal range) for the first 5 seconds |
+
+### 11.4 Thread Safety
+
+| Challenge | Solution |
+|---|---|
+| Flask runs in multi-threaded mode; multiple requests accessing shared state | `AppState` class with `threading.Lock()` for state updates; `threaded=True` in `app.run()` |
+| DB access from multiple threads | Each DB operation creates and closes its own `sqlite3.connect()` connection |
+
+### 11.5 Webcam / No-Face Handling
+
+| Challenge | Solution |
+|---|---|
+| User temporarily leaves camera view | Graceful score decay: wait 15 frames (~0.5s) before decrementing, −1 per frame after that |
+| No face found on first frame | Score starts at neutral 50; status "Initializing" |
+
+---
+
+## 12. Potential Improvements
+
+### 12.1 Model Enhancements
+
+- **Replace geometric heuristics with a trained classifier**: Train a small CNN or MLP on labeled attention data (gaze + head pose + blink features → attention level) for more accurate scoring
+- **Add emotion recognition**: Use models like FER or AffectNet to detect engagement, confusion, boredom
+- **Use Vision Transformers (ViT / Swin)**: For end-to-end attention prediction directly from face crops, bypassing landmark-based heuristics
+
+### 12.2 Feature Improvements
+
+- **Frequency-domain analysis**: Apply FFT/DCT on EAR time-series to detect micro-sleep patterns and fatigue tremors
+- **Temporal modeling**: Use LSTM/GRU on feature sequences for context-aware attention prediction (e.g., detect gradual attention decline over minutes)
+- **Multi-face support**: Track attention of multiple users simultaneously (e.g., classroom setting)
+- **Audio analysis**: Incorporate microphone input for multi-modal attention detection (speech activity, environmental noise)
+
+### 12.3 System Improvements
+
+- **WebSocket for real-time updates**: Replace 500ms HTTP polling with WebSocket or Server-Sent Events for lower-latency dashboard updates
+- **GPU acceleration**: Leverage CUDA-enabled MediaPipe or ONNX runtime for higher throughput
+- **Calibration system**: Per-user calibration of gaze thresholds for improved accuracy across different face geometries and camera positions
+- **Mobile/Edge deployment**: Convert to TensorFlow Lite / ONNX for on-device processing on phones and edge devices
+
+### 12.4 Data & Analytics
+
+- **Persistent attention analytics dashboard**: Historical charts, trend analysis, attention heatmaps over time
+- **Exportable reports**: PDF/CSV export of session data for educators or managers
+- **Better scoring model**: Collect labeled attention data and train a supervised model to learn optimal component weights instead of hand-tuning 40/30/30
+
+### 12.5 Robustness
+
+- **Adversarial robustness**: Handle adversarial scenarios (e.g., printed face, photo of open eyes)
+- **Lighting adaptation**: Auto-adjust EAR and gaze thresholds based on detected lighting conditions
+- **Occlusion handling**: Gracefully handle glasses, masks, or partial face occlusion
+- **Multi-camera support**: Support for multiple camera angles for more accurate 3D gaze estimation
+
+---
+
+## Summary
+
+This is a well-architected, **real-time computer vision system** that combines MediaPipe's pre-trained face mesh detector with classical geometric algorithms (solvePnP, EAR, iris ratios) and signal processing (EMA smoothing, moving averages) to produce an actionable attention score. The dual-frontend approach (Flask template + React/Vite/Tailwind dashboard) provides both lightweight and modern UI options. The system is production-oriented with SQLite persistence, REST APIs, thread-safe state management, and session tracking.

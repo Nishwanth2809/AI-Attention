@@ -4,17 +4,16 @@ Provides 468 facial landmarks per detected face.
 """
 
 import cv2
+import mediapipe as mp
 
 try:
-    import mediapipe as mp
     from mediapipe.python.solutions import face_mesh as mp_face_mesh
     from mediapipe.python.solutions import drawing_utils as mp_drawing
     from mediapipe.python.solutions import drawing_styles as mp_drawing_styles
 except Exception:
-    import mediapipe as mp
-    mp_face_mesh = getattr(mp, 'solutions', None) and mp.solutions.face_mesh
-    mp_drawing = getattr(mp, 'solutions', None) and mp.solutions.drawing_utils
-    mp_drawing_styles = getattr(mp, 'solutions', None) and mp.solutions.drawing_styles
+    import mediapipe.python.solutions.face_mesh as mp_face_mesh
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+    import mediapipe.python.solutions.drawing_styles as mp_drawing_styles
 
 
 class FaceDetector:
@@ -22,12 +21,20 @@ class FaceDetector:
 
     def __init__(self, max_faces=1, min_detection_conf=0.5, min_tracking_conf=0.5):
         self.mp_face_mesh = mp_face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            max_num_faces=max_faces,
-            refine_landmarks=True,  # enables iris landmarks (468 → 478)
-            min_detection_confidence=min_detection_conf,
-            min_tracking_confidence=min_tracking_conf,
-        )
+        if hasattr(self.mp_face_mesh, 'FaceMesh'):
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                max_num_faces=max_faces,
+                refine_landmarks=True,
+                min_detection_confidence=min_detection_conf,
+                min_tracking_confidence=min_tracking_conf,
+            )
+        else:
+            self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+                max_num_faces=max_faces,
+                refine_landmarks=True,
+                min_detection_confidence=min_detection_conf,
+                min_tracking_confidence=min_tracking_conf,
+            )
         self.mp_drawing = mp_drawing
         self.mp_drawing_styles = mp_drawing_styles
 

@@ -43,7 +43,7 @@ class AppState:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.face_detector = FaceDetector()
+        self._face_detector = None
         self.blink_detector = BlinkDetector()
         self.head_pose_estimator = HeadPoseEstimator()
         self.gaze_tracker = GazeTracker()
@@ -57,6 +57,12 @@ class AppState:
         self.current_gaze_dir = "Unknown"
         self.current_head_dir = "Unknown"
         self.no_face_count = 0
+
+    @property
+    def face_detector(self):
+        if self._face_detector is None:
+            self._face_detector = FaceDetector()
+        return self._face_detector
 
         # Session tracking
         self.session_id = None

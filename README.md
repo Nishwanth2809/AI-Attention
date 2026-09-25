@@ -1,3 +1,13 @@
+---
+title: AI Attention Monitoring System
+emoji: 👁️
+colorFrom: purple
+colorTo: blue
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # AI Attention Monitoring System
 
 Real-time attention monitoring using computer vision. Tracks eye gaze, head pose, and blink rate to produce an **Attention Score (0–100)**.

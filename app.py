@@ -1,39 +1,3 @@
-# ---------------------------------------------------------------------------
-# New Endpoint: Process Frame from Frontend (getUserMedia)
-# ---------------------------------------------------------------------------
-
-@app.route('/process_frame', methods=['POST'])
-def process_frame_api():
-    """Accept a single video frame (image) from the frontend, process it, and return the attention score."""
-    if 'frame' not in request.files:
-        return jsonify({'error': 'No frame provided'}), 400
-    file = request.files['frame']
-    img_bytes = file.read()
-    # Convert bytes to numpy array
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    if frame is None:
-        return jsonify({'error': 'Invalid image data'}), 400
-
-    # Process frame as usual
-    with state.lock:
-        process_frame(frame)
-        score = state.current_score
-        status = state.current_status
-        components = state.current_components
-        blink_rate = state.current_blink_rate
-        gaze_direction = state.current_gaze_dir
-        head_direction = state.current_head_dir
-
-    return jsonify({
-        'score': score,
-        'status': status,
-        'components': components,
-        'blink_rate': blink_rate,
-        'gaze_direction': gaze_direction,
-        'head_direction': head_direction,
-        'success': True
-    })
 """
 AI Attention Monitoring System — Flask Application.
 Provides webcam streaming, video file upload, and attention score API.
@@ -61,7 +25,9 @@ from src.utils import draw_score_overlay
 # Flask App Setup
 # ---------------------------------------------------------------------------
 
-app = Flask(__name__)
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), 'frontend', 'dist')
+app = Flask(__name__, static_folder=os.path.join(FRONTEND_DIST, 'assets') if os.path.exists(FRONTEND_DIST) else 'static')
+
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB max
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -352,7 +318,52 @@ def gen_video_file(filepath):
 @app.route('/')
 def index():
     """Serve the main UI."""
+    if os.path.exists(os.path.join(FRONTEND_DIST, 'index.html')):
+        return send_from_directory(FRONTEND_DIST, 'index.html')
     return render_template('index.html')
+
+
+@app.route('/assets/<path:path>')
+def serve_assets(path):
+    """Serve frontend static assets."""
+    assets_dir = os.path.join(FRONTEND_DIST, 'assets')
+    if os.path.exists(os.path.join(assets_dir, path)):
+        return send_from_directory(assets_dir, path)
+    return jsonify({'error': 'Asset not found'}), 404
+
+
+@app.route('/process_frame', methods=['POST'])
+def process_frame_api():
+    """Accept a single video frame (image) from the frontend, process it, and return the attention score."""
+    if 'frame' not in request.files:
+        return jsonify({'error': 'No frame provided'}), 400
+    file = request.files['frame']
+    img_bytes = file.read()
+    # Convert bytes to numpy array
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return jsonify({'error': 'Invalid image data'}), 400
+
+    # Process frame as usual
+    with state.lock:
+        process_frame(frame)
+        score = state.current_score
+        status = state.current_status
+        components = state.current_components
+        blink_rate = state.current_blink_rate
+        gaze_direction = state.current_gaze_dir
+        head_direction = state.current_head_dir
+
+    return jsonify({
+        'score': score,
+        'status': status,
+        'components': components,
+        'blink_rate': blink_rate,
+        'gaze_direction': gaze_direction,
+        'head_direction': head_direction,
+        'success': True
+    })
 
 
 @app.route('/video_feed')
@@ -471,13 +482,23 @@ def api_timeline():
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Hugging Face Spaces Gradio SDK Mount & Main Entrypoint
 # ---------------------------------------------------------------------------
 
+# Ensure database tables exist
+init_db()
+
+try:
+    import gradio as gr
+    # Mount Flask directly inside Gradio so HF Spaces Gradio SDK hosts the full Flask + React dashboard
+    demo = gr.mount_gradio_app(app, gr.Blocks(title="AI Attention Monitor"), path="/gradio")
+except Exception as e:
+    demo = None
+
 if __name__ == '__main__':
-    init_db()
+    port = int(os.environ.get('PORT', 7860))
     print("=" * 60)
     print("  AI Attention Monitoring System")
-    print("  Open http://127.0.0.1:5000 in your browser")
+    print(f"  Listening on http://0.0.0.0:{port}")
     print("=" * 60)
-    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+    app.run(debug=False, host='0.0.0.0', port=port, threaded=True)

@@ -1,4 +1,10 @@
-opencv-python
-mediapipe
-numpy
+opencv-python-headless
+mediapipe>=0.10.9
+protobuf>=3.20.3,<4.25.0
+numpy<2.0.0
 flask
+gunicorn; sys_platform != 'win32'
+waitress; sys_platform == 'win32'
+gradio
+
+

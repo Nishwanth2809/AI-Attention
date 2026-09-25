@@ -16,7 +16,7 @@ export default function App() {
 
   /* ── Webcam ─────────────────────────────────────────── */
   const handleStartWebcam = useCallback(() => {
-    setVideoSrc('/video_feed');
+    setVideoSrc(null);
     setFeedActive(true);
   }, []);
 

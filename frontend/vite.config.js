@@ -7,12 +7,12 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
-    allowedHosts: ['cd5f-103-232-130-247.ngrok-free.app'],
     proxy: {
       '/api': 'http://127.0.0.1:5000',
       '/video_feed': 'http://127.0.0.1:5000',
       '/upload_video': 'http://127.0.0.1:5000',
       '/stop_feed': 'http://127.0.0.1:5000',
+      '/process_frame': 'http://127.0.0.1:5000',
     },
   },
 });

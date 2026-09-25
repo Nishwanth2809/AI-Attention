@@ -1,0 +1,14 @@
+{
+  "name": "attn",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "test": "npm --prefix frontend test",
+    "preview": "npm --prefix frontend run preview"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

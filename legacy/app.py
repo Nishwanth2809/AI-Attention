@@ -5,7 +5,10 @@ Provides webcam streaming, video file upload, and attention score API.
 
 import os
 import time
-import json
+import math
+from uuid import uuid4
+from functools import wraps
+from werkzeug.utils import secure_filename, safe_join
 import sqlite3
 import threading
 from datetime import datetime
@@ -32,7 +35,7 @@ app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB max
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'attention.db')
+DB_PATH = os.environ.get('ATTENTION_DB_PATH', os.path.join(os.path.dirname(__file__), 'attention.db'))
 
 # ---------------------------------------------------------------------------
 # Global State (thread-safe via locks)
@@ -42,7 +45,7 @@ class AppState:
     """Thread-safe global state for the attention monitoring pipeline."""
 
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self._face_detector = None
         self.blink_detector = BlinkDetector()
         self.head_pose_estimator = HeadPoseEstimator()
@@ -56,13 +59,9 @@ class AppState:
         self.current_blink_rate = 0.0
         self.current_gaze_dir = "Unknown"
         self.current_head_dir = "Unknown"
-        self.no_face_count = 0
-
-    @property
-    def face_detector(self):
-        if self._face_detector is None:
-            self._face_detector = FaceDetector()
-        return self._face_detector
+        self.no_face_since = None
+        self.last_frame_time = None
+        self.last_log_time = None
 
         # Session tracking
         self.session_id = None
@@ -72,6 +71,12 @@ class AppState:
         self.video_source = 'webcam'  # 'webcam' or filename
         self.video_cap = None
 
+    @property
+    def face_detector(self):
+        if self._face_detector is None:
+            self._face_detector = FaceDetector()
+        return self._face_detector
+
     def reset_detectors(self):
         """Reset all detector states for a new session."""
         self.blink_detector.reset()
@@ -80,7 +85,13 @@ class AppState:
         self.attention_scorer.reset()
         self.current_score = 50.0
         self.current_status = "Initializing"
-        self.no_face_count = 0
+        self.no_face_since = None
+        self.last_frame_time = None
+        self.last_log_time = None
+        self.current_components = {'gaze': 0, 'head_pose': 0, 'blink': 0}
+        self.current_blink_rate = 0.0
+        self.current_gaze_dir = "Unknown"
+        self.current_head_dir = "Unknown"
 
 
 state = AppState()
@@ -116,6 +127,7 @@ def init_db():
             FOREIGN KEY (session_id) REFERENCES sessions(id)
         )
     ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_score_log_session_time ON score_log(session_id, timestamp)')
     conn.commit()
     conn.close()
 
@@ -163,7 +175,35 @@ def end_session(session_id, avg_score):
 # Frame Processing Pipeline
 # ---------------------------------------------------------------------------
 
-def process_frame(frame):
+def synchronized(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with state.lock:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def finish_session(session_id):
+    """Finish only the session owned by the caller. Caller holds state.lock."""
+    if session_id is not None and state.session_id == session_id:
+        end_session(session_id, state.attention_scorer.get_average_score())
+        state.session_id = None
+        state.session_active = False
+
+
+def log_current_score():
+    """Sample by elapsed time, independent of camera frame rate."""
+    now = time.monotonic()
+    if state.session_id and (state.last_log_time is None or now - state.last_log_time >= 1):
+        components = state.current_components
+        log_score(state.session_id, state.current_score, state.current_status,
+                  components['gaze'] / 100, components['head_pose'] / 100,
+                  components['blink'] / 100)
+        state.last_log_time = now
+
+
+@synchronized
+def process_frame(frame, annotate=True):
     """
     Run the full attention detection pipeline on a single frame.
     Updates global state with results. Returns annotated frame.
@@ -173,19 +213,25 @@ def process_frame(frame):
     # Detect face
     faces = state.face_detector.detect(frame)
     
+    now = time.monotonic()
+    elapsed = 0 if state.last_frame_time is None else now - state.last_frame_time
+    state.last_frame_time = now
     if not faces:
-        state.no_face_count += 1
-        if state.no_face_count > 15:  # ~0.5s at 30fps
+        if state.no_face_since is None:
+            state.no_face_since = now
+        if now - state.no_face_since >= 0.5:
             state.current_status = "No Face Detected"
-            state.current_score = max(0, state.current_score - 1)
-        
-        # Draw overlay even with no face
-        frame = draw_score_overlay(
-            frame, state.current_score, state.current_status
-        )
-        return frame
+            state.current_score = max(0, state.current_score - 30 * elapsed)
+        state.attention_scorer.record_score(state.current_score)
+        state.current_components = {'gaze': 0, 'head_pose': 0, 'blink': 0}
+        state.current_gaze_dir = state.current_head_dir = "Unknown"
+        state.current_blink_rate = 0.0
+        # A gap in face tracking must not count as continuous eye closure.
+        state.blink_detector.interrupt_tracking()
+        log_current_score()
+        return draw_score_overlay(frame, state.current_score, state.current_status) if annotate else frame
     
-    state.no_face_count = 0
+    state.no_face_since = None
     landmarks = faces[0]  # use first face
 
     # Blink detection
@@ -214,23 +260,9 @@ def process_frame(frame):
         state.current_gaze_dir = gaze_result['direction']
         state.current_head_dir = head_result['direction']
 
-    # Log to DB periodically (every ~1 second = every 30 frames)
-    if state.session_id and hasattr(process_frame, '_frame_count'):
-        process_frame._frame_count += 1
-        if process_frame._frame_count % 30 == 0:
-            try:
-                log_score(
-                    state.session_id,
-                    score_result['smoothed_score'],
-                    score_result['status'],
-                    gaze_result['gaze_score'],
-                    head_result['head_score'],
-                    blink_result['blink_score'],
-                )
-            except Exception:
-                pass
-    else:
-        process_frame._frame_count = 0
+    log_current_score()
+    if not annotate:
+        return frame
 
     # Draw overlay
     frame = draw_score_overlay(
@@ -249,77 +281,65 @@ def process_frame(frame):
 # Video Generators
 # ---------------------------------------------------------------------------
 
-def gen_webcam():
-    """Generate MJPEG frames from webcam."""
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        return
-
-    state.reset_detectors()
-    state.session_id = start_session('webcam')
-    state.session_active = True
-
+def gen_frames(source, label, mirror=False):
+    """One capture owner; release resources even on disconnect or processing errors."""
+    cap = None
+    session_id = None
     try:
-        while state.session_active:
-            ret, frame = cap.read()
-            if not ret:
+        with state.lock:
+            if state.session_active:
+                return
+            cap = cv2.VideoCapture(source)
+            if not cap.isOpened():
+                return
+            state.reset_detectors()
+            session_id = start_session(label)
+            state.session_id = session_id
+            state.session_active = True
+            state.video_source = label
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = fps if math.isfinite(fps) and fps > 0 else 30
+        while True:
+            started = time.monotonic()
+            with state.lock:
+                if not state.session_active or state.session_id != session_id:
+                    break
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if mirror:
+                    frame = cv2.flip(frame, 1)
+                frame = process_frame(frame)
+            ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ok:
                 break
-
-            frame = cv2.flip(frame, 1)  # mirror
-            frame = process_frame(frame)
-
-            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            yield (
-                b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
-            )
+            yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
+            if not mirror:
+                # Processing and transport already consumed part of the frame interval.
+                time.sleep(max(0, 1.0 / fps - (time.monotonic() - started)))
     finally:
-        cap.release()
-        if state.session_id:
-            avg = state.attention_scorer.get_average_score()
-            end_session(state.session_id, avg)
-            state.session_id = None
+        if cap is not None:
+            cap.release()
+        with state.lock:
+            finish_session(session_id)
+
+
+def gen_webcam():
+    return gen_frames(0, 'webcam', mirror=True)
 
 
 def gen_video_file(filepath):
-    """Generate MJPEG frames from a video file."""
-    cap = cv2.VideoCapture(filepath)
-    if not cap.isOpened():
-        return
-
-    state.reset_detectors()
-    filename = os.path.basename(filepath)
-    state.session_id = start_session(f'file:{filename}')
-    state.session_active = True
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    delay = 1.0 / fps
-
-    try:
-        while state.session_active:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            frame = process_frame(frame)
-
-            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            yield (
-                b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
-            )
-            time.sleep(delay)
-    finally:
-        cap.release()
-        if state.session_id:
-            avg = state.attention_scorer.get_average_score()
-            end_session(state.session_id, avg)
-            state.session_id = None
+    return gen_frames(filepath, f'file:{os.path.basename(filepath)}')
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@app.errorhandler(413)
+def upload_too_large(error):
+    return jsonify({'error': 'Upload exceeds the 200 MB limit'}), 413
+
 
 @app.route('/')
 def index():
@@ -338,22 +358,52 @@ def serve_assets(path):
     return jsonify({'error': 'Asset not found'}), 404
 
 
+@app.route('/start_feed', methods=['POST'])
+@synchronized
+def start_browser_feed():
+    if state.session_active:
+        return jsonify({'error': 'A monitoring session is already active'}), 409
+    state.reset_detectors()
+    state.session_id = start_session('webcam')
+    state.session_active = True
+    state.video_source = 'browser'
+    return jsonify({'session_id': state.session_id})
+
+
 @app.route('/process_frame', methods=['POST'])
+@synchronized
 def process_frame_api():
     """Accept a single video frame (image) from the frontend, process it, and return the attention score."""
     if 'frame' not in request.files:
         return jsonify({'error': 'No frame provided'}), 400
     file = request.files['frame']
-    img_bytes = file.read()
+    img_bytes = file.read(2 * 1024 * 1024 + 1)
+    if not img_bytes or len(img_bytes) > 2 * 1024 * 1024:
+        return jsonify({'error': 'Frame must be between 1 byte and 2 MB'}), 400
     # Convert bytes to numpy array
     np_arr = np.frombuffer(img_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     if frame is None:
         return jsonify({'error': 'Invalid image data'}), 400
 
-    # Process frame as usual
+    requested_id = request.form.get('session_id', type=int)
+    if 'session_id' in request.form and (requested_id != state.session_id or not state.session_active):
+        return jsonify({'error': 'Session is no longer active'}), 409
+    if state.session_active and state.video_source != 'browser':
+        return jsonify({'error': 'Another video source is active'}), 409
+    # Preserve support for legacy clients that start on their first frame.
+    if state.session_id is None:
+        state.reset_detectors()
+        state.session_id = start_session('webcam')
+        state.session_active = True
+        state.video_source = 'browser'
+    height, width = frame.shape[:2]
+    if max(height, width) > 640:
+        scale = 640 / max(height, width)
+        frame = cv2.resize(frame, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=cv2.INTER_AREA)
+    process_frame(frame, annotate=False)
+
     with state.lock:
-        process_frame(frame)
         score = state.current_score
         status = state.current_status
         components = state.current_components
@@ -396,7 +446,7 @@ def upload_video():
     if ext not in allowed:
         return jsonify({'error': f'Unsupported format. Allowed: {", ".join(allowed)}'}), 400
 
-    filename = f"{int(time.time())}_{file.filename}"
+    filename = f"{uuid4().hex}_{secure_filename(file.filename) or ('video' + ext)}"
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
 
@@ -410,8 +460,8 @@ def upload_video():
 @app.route('/video_feed/<filename>')
 def video_feed_file(filename):
     """MJPEG stream of an uploaded video file."""
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    if not os.path.exists(filepath):
+    filepath = safe_join(app.config['UPLOAD_FOLDER'], filename)
+    if filepath is None or not os.path.isfile(filepath):
         return jsonify({'error': 'File not found'}), 404
 
     return Response(
@@ -421,9 +471,13 @@ def video_feed_file(filename):
 
 
 @app.route('/stop_feed', methods=['POST'])
+@synchronized
 def stop_feed():
     """Stop the current video feed."""
-    state.session_active = False
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    finish_session(payload.get('session_id', state.session_id))
     return jsonify({'success': True})
 
 
@@ -481,6 +535,7 @@ def api_session_detail(session_id):
 
 
 @app.route('/api/timeline')
+@synchronized
 def api_timeline():
     """Get current session score timeline (for live graph)."""
     timeline = state.attention_scorer.get_score_timeline()
@@ -488,18 +543,11 @@ def api_timeline():
 
 
 # ---------------------------------------------------------------------------
-# Hugging Face Spaces Gradio SDK Mount & Main Entrypoint
+# Database Initialization & Main Entrypoint
 # ---------------------------------------------------------------------------
 
 # Ensure database tables exist
 init_db()
-
-try:
-    import gradio as gr
-    # Mount Flask directly inside Gradio so HF Spaces Gradio SDK hosts the full Flask + React dashboard
-    demo = gr.mount_gradio_app(app, gr.Blocks(title="AI Attention Monitor"), path="/gradio")
-except Exception as e:
-    demo = None
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 7860))
@@ -508,4 +556,3 @@ if __name__ == '__main__':
     print(f"  Listening on http://0.0.0.0:{port}")
     print("=" * 60)
     app.run(debug=False, host='0.0.0.0', port=port, threaded=True)
-    

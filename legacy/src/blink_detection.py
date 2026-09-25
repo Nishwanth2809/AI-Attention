@@ -164,6 +164,13 @@ class BlinkDetector:
         else:
             return max(0.0, 1.0 - (bpm - high) / 30.0)
 
+    def interrupt_tracking(self):
+        """Discard closure continuity without losing the session's blink history."""
+        self.eye_closed = False
+        self.eye_close_start = None
+        self.is_drowsy = False
+        self._ear_history = []
+
     def reset(self):
         """Reset state for a new session."""
         self.blink_count = 0

@@ -1,0 +1,5 @@
+# This project uses the legacy MediaPipe Face Mesh Solutions API.
+mediapipe>=0.10.10,<=0.10.21
+flask>=3.0,<4
+numpy>=1.26,<2
+opencv-contrib-python>=4.8,<4.12

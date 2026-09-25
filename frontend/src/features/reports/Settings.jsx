@@ -1,0 +1,16 @@
+import { useState } from 'react';
+import Icon from '../../ui/Icon';
+import { download } from '../../core/session';
+export default function Settings({ focus }) {
+  const [permission, setPermission] = useState(() => 'Notification' in window ? Notification.permission : 'unsupported');
+  const [confirmClear, setConfirmClear] = useState(false);
+  async function enableNotifications() {
+    try { setPermission(await Notification.requestPermission()); }
+    catch { focus.setNotice({ title: 'Notifications unavailable', message: 'Your browser cannot show desktop notifications here. Coach cards still work.' }); }
+  }
+  return <><div className="page-heading"><div className="eyebrow">YOUR SPACE. YOUR CHOICES.</div><h1>Comfortably in control.</h1><p>A few things to make this space feel like yours.</p></div><div className="settings-grid">
+    <section className="panel settings-card"><span className="settings-icon"><Icon name="bell" size={25}/></span><h2>A nudge, where you need it.</h2><p>Enable desktop notifications for rules with the notification action. Your coach will always show an in-app card too.</p><div className="setting-status"><span>Browser permission</span><strong>{permission}</strong></div><button className="button button-primary" disabled={permission !== 'default'} onClick={enableNotifications}>Enable notifications <Icon name="bell" size={15}/></button>{permission === 'denied' && <p className="form-hint">Notifications were blocked. Change this in your browser’s site settings.</p>}</section>
+    <section className="panel settings-card"><span className="settings-icon"><Icon name="shield" size={25}/></span><h2>Private is the default.</h2><p>Camera frames are analyzed on your device in a background worker. Video is never uploaded or recorded. Model files load from Google and jsDelivr when you start a camera session.</p><ul className="privacy-list"><li><Icon name="check" size={15}/> No login or analytics trackers</li><li><Icon name="check" size={15}/> No camera access in demo mode</li><li><Icon name="check" size={15}/> Rules and reports stay in this browser</li></ul></section>
+    <section className="panel settings-card wide"><div><h2>Your reports belong to you.</h2><p>We keep your latest 30 completed sessions. Export them before clearing browser data or moving to another device.</p></div><div className="button-row"><button className="button button-white" onClick={() => download('attn-backup.json', JSON.stringify({ version: 2, sessions: focus.sessions, rules: focus.rules }, null, 2))}><Icon name="download" size={16}/> Export my data</button><button className="button button-danger" disabled={!focus.sessions.length} onClick={() => setConfirmClear(true)}><Icon name="trash" size={16}/> Clear reports</button></div>{confirmClear && <div className="inline-confirm"><span>Delete all completed reports from this browser? Export anything you want to keep first.</span><button className="button button-danger" onClick={() => { focus.setSessions([]); setConfirmClear(false); }}>Yes, clear reports</button><button className="text-button" onClick={() => setConfirmClear(false)}>Cancel</button></div>}</section>
+  </div><div className="bottom-note"><Icon name="info" size={14}/> Keep this tab visible for live coaching. A hidden tab or sleeping device pauses the session.</div></>;
+}

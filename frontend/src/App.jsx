@@ -1,94 +1,23 @@
-import { useState, useCallback } from 'react';
-import Navbar from './components/Navbar';
-import VideoPanel from './components/VideoPanel';
-import ScoreCard from './components/ScoreCard';
-import ComponentsCard from './components/ComponentsCard';
-import DetailsCard from './components/DetailsCard';
-import SessionsCard from './components/SessionsCard';
-import EyeMechanism from './components/EyeMechanism';
-import { useAttentionData } from './hooks/useAttentionData';
-
+import { useState } from 'react';
+import Icon from './ui/Icon';
+import FocusSpace from './features/focus/FocusSpace';
+import Automations from './features/automations/Automations';
+import Reports from './features/reports/Reports';
+import Settings from './features/reports/Settings';
+import { useFocus } from './features/focus/useFocus';
 export default function App() {
-  const [feedActive, setFeedActive] = useState(false);
-  const [videoSrc, setVideoSrc] = useState(null);
-
-  const data = useAttentionData(feedActive);
-
-  /* ── Webcam ─────────────────────────────────────────── */
-  const handleStartWebcam = useCallback(() => {
-    setVideoSrc(null);
-    setFeedActive(true);
-  }, []);
-
-  /* ── Upload ─────────────────────────────────────────── */
-  const handleUpload = useCallback(async () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'video/*';
-    input.onchange = async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-
-      const formData = new FormData();
-      formData.append('video', file);
-
-      try {
-        const res = await fetch('/upload_video', { method: 'POST', body: formData });
-        const json = await res.json();
-        if (json.success) {
-          setVideoSrc(json.stream_url);
-          setFeedActive(true);
-        }
-      } catch (err) {
-        console.error('Upload failed:', err);
-      }
-    };
-    input.click();
-  }, []);
-
-  /* ── Stop ───────────────────────────────────────────── */
-  const handleStop = useCallback(async () => {
-    try {
-      await fetch('/stop_feed', { method: 'POST' });
-    } catch {
-      /* ignore */
-    }
-    setFeedActive(false);
-    setVideoSrc(null);
-  }, []);
-
-  return (
-    <div className="min-h-screen flex flex-col">
-      <Navbar
-        onStart={handleStartWebcam}
-        onUpload={handleUpload}
-        onStop={handleStop}
-        feedActive={feedActive}
-      />
-
-      {/* Main Grid */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5 p-5 pt-3 max-w-[1600px] mx-auto w-full">
-        {/* Left: Video */}
-        <VideoPanel src={videoSrc} active={feedActive} />
-
-        {/* Right: Sidebar Cards */}
-        <aside className="flex flex-col gap-4 stagger">
-          <ScoreCard score={data.score} status={data.status} active={feedActive} />
-          <EyeMechanism
-            gazeDirection={data.gazeDirection}
-            gazeScore={data.components?.gaze ?? 0}
-            blinkRate={data.blinkRate}
-            isActive={feedActive}
-          />
-          <ComponentsCard components={data.components} />
-          <DetailsCard
-            gazeDirection={data.gazeDirection}
-            headDirection={data.headDirection}
-            blinkRate={data.blinkRate}
-          />
-          <SessionsCard />
-        </aside>
-      </main>
+  const [page, setPage] = useState('focus');
+  const focus = useFocus();
+  const nav = [['focus', 'grid', 'Focus space'], ['automations', 'bolt', 'Automations'], ['reports', 'chart', 'Reports']];
+  return <div className="app-shell">
+    <a className="skip-link" href="#main">Skip to content</a>
+    <aside className="sidebar"><a className="brand" href="#" onClick={e => { e.preventDefault(); setPage('focus'); }} aria-label="Attn home"><span className="brand-mark"><span/><span/><span/></span><strong>attn<span>.</span></strong></a><div className="sidebar-caption">MAKE SPACE FOR WHAT MATTERS</div><div className="nav-label">WORKSPACE</div><nav aria-label="Main navigation">{nav.map(([id, icon, name]) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}><Icon name={icon} size={19}/><span>{name}</span>{id === 'automations' && <small>{focus.rules.filter(r => r.enabled).length}</small>}</button>)}</nav>
+      <div className="sidebar-bottom"><div className="sidebar-note"><span className="little-spark">✳</span><h3>Less noise.<br/>More meaningful work.</h3><p>A personal coach for your attention, one session at a time.</p><button onClick={() => { setPage('focus'); if (!focus.live) focus.start('demo', 'Explore your focus coach', 25); }}>Explore the demo <Icon name="arrow" size={14}/></button></div><button className={`nav-item ${page === 'settings' ? 'active' : ''}`} aria-label="Settings and privacy" onClick={() => setPage('settings')}><Icon name="settings" size={19}/><span>Settings & privacy</span></button><div className="local-profile"><span className="profile-icon"><Icon name="leaf" size={19}/></span><div><strong>Your personal space</strong><small><i/> Saved on this device</small></div></div></div>
+    </aside>
+    <div className="app-body"><header className="topbar"><div><span className="breadcrumb">Workspace</span><span className="slash">/</span><strong>{nav.find(n => n[0] === page)?.[2] || 'Settings & privacy'}</strong></div><div className="topbar-right"><span className="today">{new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}</span>{focus.live ? <button className="header-session" onClick={() => setPage('focus')}><span className={`dot ${focus.phase === 'running' ? 'green-dot' : ''}`}/>{focus.phase === 'running' ? 'Session active' : 'Session paused'}</button> : <span className="header-session"><Icon name="leaf" size={14}/> A fresh start</span>}<button className="icon-button help-button" aria-label="Privacy information" onClick={() => setPage('settings')}><Icon name="info" size={19}/></button></div></header>
+      <main id="main" className="main-content"><div hidden={page !== 'focus'}><FocusSpace focus={focus} navigate={setPage}/></div>{page === 'automations' && <Automations focus={focus}/>} {page === 'reports' && <Reports focus={focus} navigate={setPage}/>} {page === 'settings' && <Settings focus={focus}/>}
+      <footer className="app-footer"><span>Designed for intention, not perfection.</span><span>attn. <i/> YOUR PERSONAL FOCUS COACH</span></footer></main>
     </div>
-  );
+    {focus.notice && <div className={`toast ${focus.notice.error ? 'error' : ''}`} role="status"><span className="toast-icon"><Icon name={focus.notice.error ? 'info' : 'leaf'} size={22}/></span><div><strong>{focus.notice.title}</strong><p>{focus.notice.message}</p></div><button className="icon-button" onClick={() => focus.setNotice(null)} aria-label="Dismiss coach message"><Icon name="close" size={17}/></button></div>}
+  </div>;
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 
 /**
  * Custom hook that polls /api/score while a feed is active.
@@ -14,21 +14,18 @@ export function useAttentionData(active) {
     headDirection: 'Unknown',
   });
 
-  const intervalRef = useRef(null);
-
   useEffect(() => {
-    if (!active) {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      return;
-    }
+    if (!active) return;
+    let cancelled = false;
+    let timer;
+    const controller = new AbortController();
 
     async function poll() {
       try {
-        const res = await fetch('/api/score');
+        const res = await fetch('/api/score', { signal: controller.signal });
+        if (!res.ok) throw new Error('Score request failed');
         const json = await res.json();
+        if (cancelled) return;
         setData({
           score: json.score ?? 50,
           status: json.status ?? 'Initializing',
@@ -38,21 +35,16 @@ export function useAttentionData(active) {
           headDirection: json.head_direction ?? 'Unknown',
         });
       } catch {
-        /* backend unreachable */
+        /* Retry on the next poll unless the component was stopped. */
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 500);
       }
     }
-
-    // Immediate first poll
     poll();
-
-    // Then every 500ms
-    intervalRef.current = setInterval(poll, 500);
-
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+      cancelled = true;
+      controller.abort();
+      clearTimeout(timer);
     };
   }, [active]);
 

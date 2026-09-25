@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Attn vision smoke check</title><body><h1>Vision worker smoke check</h1><p>No camera or microphone is used. This checks model loading and inference on a blank image.</p><button id="start">Run vision check</button><pre id="result">Not started</pre><script type="module">
+const output=document.querySelector('#result');
+document.querySelector('#start').onclick=()=>{
+  document.querySelector('#start').disabled=true;output.textContent='Loading model…';
+  const worker=new Worker('/vision-worker.js');
+  const timeout=setTimeout(()=>{output.textContent='FAIL: model timed out';worker.terminate();},60000);
+  worker.onerror=e=>{clearTimeout(timeout);output.textContent='FAIL: '+e.message;worker.terminate();};
+  worker.onmessage=async({data})=>{
+    if(data.type==='ready'){
+      output.textContent='Model loaded. Processing a blank frame…';
+      const canvas=document.createElement('canvas');canvas.width=320;canvas.height=240;
+      canvas.getContext('2d').fillRect(0,0,320,240);
+      const bitmap=await createImageBitmap(canvas);worker.postMessage({type:'frame',bitmap,timestamp:performance.now()},[bitmap]);
+    }else if(data.type==='result'){
+      clearTimeout(timeout);output.textContent=data.points.length===0?'PASS: model loaded, worker inference completed, no face detected on blank input.':'FAIL: unexpected face';worker.terminate();
+    }else if(data.type==='error'){clearTimeout(timeout);output.textContent='FAIL: '+data.message;worker.terminate();}
+  };worker.postMessage({type:'init'});
+};</script></body></html>

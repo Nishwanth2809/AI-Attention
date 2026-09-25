@@ -4,6 +4,7 @@ Combines gaze, head pose, and blink stability into a single score (0-100).
 """
 
 import time
+from collections import deque
 
 # Weights for attention components
 GAZE_WEIGHT = 0.40
@@ -26,8 +27,10 @@ class AttentionScorer:
         """
         self.ema_alpha = ema_alpha
         self._smoothed_score = 50.0  # start at neutral
-        self._score_history = []
-        self._max_history = 300  # ~10 seconds at 30fps
+        self._max_history = 300
+        self._score_history = deque(maxlen=self._max_history)
+        self._score_total = 0.0
+        self._score_count = 0
         self.start_time = time.time()
 
     def calculate(self, gaze_score, head_score, blink_score, is_drowsy=False):
@@ -66,13 +69,7 @@ class AttentionScorer:
             (1 - self.ema_alpha) * self._smoothed_score
         )
 
-        # Track history
-        self._score_history.append({
-            'time': time.time() - self.start_time,
-            'score': self._smoothed_score,
-        })
-        if len(self._score_history) > self._max_history:
-            self._score_history.pop(0)
+        self.record_score(self._smoothed_score)
 
         # Determine status
         if is_drowsy:
@@ -95,11 +92,18 @@ class AttentionScorer:
             },
         }
 
+    def record_score(self, score):
+        """Record every observation, including absence of a face."""
+        self._smoothed_score = score
+        self._score_history.append({'time': time.time() - self.start_time, 'score': score})
+        self._score_total += score
+        self._score_count += 1
+
     def get_average_score(self):
         """Get average score over the session."""
-        if not self._score_history:
+        if not self._score_count:
             return 50.0
-        return sum(s['score'] for s in self._score_history) / len(self._score_history)
+        return self._score_total / self._score_count
 
     def get_score_timeline(self):
         """Get score history for graphing."""
@@ -108,5 +112,7 @@ class AttentionScorer:
     def reset(self):
         """Reset for a new session."""
         self._smoothed_score = 50.0
-        self._score_history = []
+        self._score_history.clear()
+        self._score_total = 0.0
+        self._score_count = 0
         self.start_time = time.time()

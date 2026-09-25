@@ -3,8 +3,6 @@ mediapipe==0.10.14
 protobuf<4.25.0
 numpy<2.0.0
 flask
-gunicorn; sys_platform != 'win32'
-waitress; sys_platform == 'win32'
-gradio
+
 
 
